@@ -1,0 +1,271 @@
+﻿
+#include <string.h>
+#include "aes128e.h"
+
+/*	File: aes128e.c
+ *	Synopsis: AES encryption with 128 bit key
+ *	Author: yury.shukhrov@gmail.com
+ *	Date: 24.11.2014
+ */
+
+ /* Multiplication by two in GF(2^8). Multiplication by three is xtime(a) ^ a */
+#define xtime(a) ( ((a) & 0x80) ? (((a) << 1) ^ 0x1b) : ((a) << 1) )
+
+/* The S-box table */
+static const byte sbox[256] = {
+	//    0     1     2     3     4     5     6     7     8     9     A     B     C     D     E     F
+		0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,		//	0
+		0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,		//	1
+		0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,		//	2
+		0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,		//	3
+		0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,		//	4
+		0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,		//	5
+		0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,		//	6
+		0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,		//	7
+		0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,		//	8
+		0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,		//	9
+		0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,		//	A
+		0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,		//	B
+		0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,		//	C
+		0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,		//	D
+		0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,		//	E
+		0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16 };	//	F
+
+	/* The round constant table (needed in KeyExpansion) */
+static const byte rcon[255] = {
+	0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36, 0x6c, 0xd8, 0xab, 0x4d, 0x9a,
+	0x2f, 0x5e, 0xbc, 0x63, 0xc6, 0x97, 0x35, 0x6a, 0xd4, 0xb3, 0x7d, 0xfa, 0xef, 0xc5, 0x91, 0x39,
+	0x72, 0xe4, 0xd3, 0xbd, 0x61, 0xc2, 0x9f, 0x25, 0x4a, 0x94, 0x33, 0x66, 0xcc, 0x83, 0x1d, 0x3a,
+	0x74, 0xe8, 0xcb, 0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36, 0x6c, 0xd8,
+	0xab, 0x4d, 0x9a, 0x2f, 0x5e, 0xbc, 0x63, 0xc6, 0x97, 0x35, 0x6a, 0xd4, 0xb3, 0x7d, 0xfa, 0xef,
+	0xc5, 0x91, 0x39, 0x72, 0xe4, 0xd3, 0xbd, 0x61, 0xc2, 0x9f, 0x25, 0x4a, 0x94, 0x33, 0x66, 0xcc,
+	0x83, 0x1d, 0x3a, 0x74, 0xe8, 0xcb, 0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b,
+	0x36, 0x6c, 0xd8, 0xab, 0x4d, 0x9a, 0x2f, 0x5e, 0xbc, 0x63, 0xc6, 0x97, 0x35, 0x6a, 0xd4, 0xb3,
+	0x7d, 0xfa, 0xef, 0xc5, 0x91, 0x39, 0x72, 0xe4, 0xd3, 0xbd, 0x61, 0xc2, 0x9f, 0x25, 0x4a, 0x94,
+	0x33, 0x66, 0xcc, 0x83, 0x1d, 0x3a, 0x74, 0xe8, 0xcb, 0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20,
+	0x40, 0x80, 0x1b, 0x36, 0x6c, 0xd8, 0xab, 0x4d, 0x9a, 0x2f, 0x5e, 0xbc, 0x63, 0xc6, 0x97, 0x35,
+	0x6a, 0xd4, 0xb3, 0x7d, 0xfa, 0xef, 0xc5, 0x91, 0x39, 0x72, 0xe4, 0xd3, 0xbd, 0x61, 0xc2, 0x9f,
+	0x25, 0x4a, 0x94, 0x33, 0x66, 0xcc, 0x83, 0x1d, 0x3a, 0x74, 0xe8, 0xcb, 0x8d, 0x01, 0x02, 0x04,
+	0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36, 0x6c, 0xd8, 0xab, 0x4d, 0x9a, 0x2f, 0x5e, 0xbc, 0x63,
+	0xc6, 0x97, 0x35, 0x6a, 0xd4, 0xb3, 0x7d, 0xfa, 0xef, 0xc5, 0x91, 0x39, 0x72, 0xe4, 0xd3, 0xbd,
+	0x61, 0xc2, 0x9f, 0x25, 0x4a, 0x94, 0x33, 0x66, 0xcc, 0x83, 0x1d, 0x3a, 0x74, 0xe8, 0xcb };
+
+/*
+ * Creates 10 unique 128 bit keys for each encryption round.
+ * The original AES 128 bit key is used to produce all other keys.
+ * It is appended to the keys array, which will store 11 keys.
+ */
+void expand_key(byte* keys, byte* key) {
+	/* Current expanded key size, in bytes. */
+	size_t cur_size = 16;
+	/* Current rcon iteration count. */
+	size_t rcon_iter = 1;
+	/* Temp 4 byte (word) array. */
+	byte temp[4] = { 0 };
+
+	/* The first 16 bytes of the expanded key are simply the encryption key. */
+	memcpy(keys, key, 16);
+
+	/* Generate other 10 * 16 = 160 byte keys and
+	 * append them to the expanded key array.
+	 * One 16 byte key per each round.
+	 * There are 11 round:
+	 * - Initial round.
+	 * - Nine intermediate rounds.
+	 * - Final round.
+	 */
+	while (cur_size < 176) {
+		/* We assign the value of the previous four bytes in the expanded key to temp. */
+		memcpy(temp, keys + cur_size - 4, 4);
+
+		/* Every 16 bytes we apply the core key schedule to temp
+		 *  and increment rcon_iter afterwards.
+		 */
+		if (cur_size % 16 == 0) {
+			key_schedule(temp, rcon_iter++);
+		}
+
+		/* We XOR temp with the four-byte block 16 bytes before the new expanded key.
+		 * This becomes the next four bytes in the expanded key.
+		 */
+		for (size_t i = 0; i < 4; i++) {
+			keys[cur_size] = keys[cur_size - 16] ^ temp[i];
+			cur_size++;
+		}
+	}
+}
+
+/* The core key schedule procedure.
+ * We proceed as follows:
+ *
+ * 1) RotWord().
+ * 2) SubWord().
+ * 3) XOR RCon.
+ */
+void key_schedule(byte* word, size_t iter) {
+
+	byte b = word[0];
+
+	/* Rotate the 32-bit word 8 bits to the left.
+	 * Equivalent to RotWord().
+	 */
+	for (size_t i = 0; i < 3; i++)
+		word[i] = word[i + 1];
+	word[3] = b;
+
+	/* Apply S-Box substitution on all 4 parts of the 32-bit word.
+	 * Equivalent to SubWord().
+	 */
+	for (size_t i = 0; i < 4; ++i)
+		word[i] = sbox[word[i]];
+
+	/* XOR the output of the rcon operation with
+	 * iter to the first part (leftmost) only.
+	 * Equivalent to XOR RCon.
+	 */
+	word[0] = word[0] ^ rcon[iter];
+}
+
+/* Adds the round key to state matrix.
+ * The round key is added to the state by XOR'ing.
+ */
+void add_round_key(Tstate* state, byte* keys, size_t round) {
+	for (size_t i = 0; i < 4; i++)
+		for (size_t j = 0; j < 4; j++)
+			state[j][i] ^= keys[round * 16 + i * 4 + j];
+}
+
+/* Substitutes the values in the
+ * state matrix with values in an S-box.
+ */
+void sub_bytes(Tstate* state) {
+	for (size_t i = 0; i < 4; i++)
+		for (size_t j = 0; j < 4; j++)
+			state[i][j] = sbox[state[i][j]];
+}
+
+/*
+ * We shift the rows in the state matrix
+ * to the left to create an effect of confussion.
+ * Each row is shifted with a different offset.
+ * Offset = Row number. So the first row is not shifted.
+ * The second row is shifted left 1 position.
+ * The third row is shifted left 2 positions.
+ * The fourth row is shifted left 3 positions.
+ */
+void shift_rows(Tstate* state) {
+	byte temp;
+
+	/* Rotate first row 1 columns to left. */
+	temp = state[1][0];
+	state[1][0] = state[1][1];
+	state[1][1] = state[1][2];
+	state[1][2] = state[1][3];
+	state[1][3] = temp;
+
+	/* Rotate second row 2 columns to left. */
+	temp = state[2][0];
+	state[2][0] = state[2][2];
+	state[2][2] = temp;
+
+	temp = state[2][1];
+	state[2][1] = state[2][3];
+	state[2][3] = temp;
+
+	/* Rotate third row 3 columns to left. */
+	temp = state[3][0];
+	state[3][0] = state[3][3];
+	state[3][3] = state[3][2];
+	state[3][2] = state[3][1];
+	state[3][1] = temp;
+}
+
+/* We mix the columns of the state
+ * matrix to create an effect of diffusion.
+ *
+ * It works like this:
+ * The state matrix is in the form (already shifted).
+ *	-----------------------------
+ *	| B_0  | B_4  | B_8  | B_12 |
+ *	-----------------------------
+ *	| B_5  | B_9  | B_13 | B_1  |
+ *	-----------------------------
+ *	| B_10 | B_14 | B_2  | B_6  |
+ *	-----------------------------
+ *	| B_15 | B_3  | B_7  | B_11 |
+ *	-----------------------------
+ *
+ * Now we take each column and multiply it with a given matrix.
+ * The result is a new column vector:
+ *
+ *	-------		---------------------	  --------
+ *	| C_0 |		| 02 | 03 | 01 | 01 |	  | B_0  |
+ *	-------		---------------------	  --------
+ *	| C_1 |		| 01 | 02 | 03 | 01 |	  | B_5  |
+ *	-------  =  ---------------------  x  --------
+ *	| C_2 |		| 01 | 01 | 02 | 03 |	  | B_10 |
+ *	-------		---------------------	  --------
+ *	| C_3 |		| 03 | 01 | 01 | 02 |	  | B_15 |
+ *	-------		---------------------	  --------
+ */
+void mix_columns(Tstate* state) {
+	byte Tmp, Tm, t;
+
+	for (size_t i = 0; i < 4; i++) {
+		t = state[0][i];
+		Tmp = state[0][i] ^ state[1][i] ^ state[2][i] ^ state[3][i];
+		Tm = state[0][i] ^ state[1][i]; Tm = xtime(Tm); state[0][i] ^= Tm ^ Tmp;
+		Tm = state[1][i] ^ state[2][i]; Tm = xtime(Tm); state[1][i] ^= Tm ^ Tmp;
+		Tm = state[2][i] ^ state[3][i]; Tm = xtime(Tm); state[2][i] ^= Tm ^ Tmp;
+		Tm = state[3][i] ^ t;           Tm = xtime(Tm); state[3][i] ^= Tm ^ Tmp;
+	}
+}
+
+/* Under the 16-byte key at k, encrypt the 16-byte plaintext at p and store it at c.
+ *
+ * Note: I have not changed the signature of this function
+ * as the instructions warned not to, but IMHO it should look like:
+ *		void aes128e(byte *out, const byte *in, const byte *key);
+ */
+void aes128e(unsigned char* c, const unsigned char* p, const unsigned char* k) {
+
+	/* Stores 11 x 16 byte unique keys, generated by key expansion. */
+	byte keys[176];
+	/* Represents a state matrix to store the intermediate results. */
+	byte state[4][4];
+
+	/* We need to perform key expansion first. */
+	expand_key(keys, (byte*)k);
+
+	/* Copy the input plain text to the state matrix. */
+	for (size_t i = 0; i < 4; i++)
+		for (size_t j = 0; j < 4; j++)
+			state[j][i] = p[(i * 4) + j];
+
+	/* Add the first round key to the state matrix before starting intermediate rounds. */
+	add_round_key(state, keys, 0);
+
+	/* Intermediate rounds: 1 - 9 */
+	for (size_t round = 1; round < 10; round++) {
+		sub_bytes(state);
+		shift_rows(state);
+		mix_columns(state);
+		add_round_key(state, keys, round);
+	}
+
+	/* Final round:
+	 * Note: we do not need to call mix_columns() in this round.
+	 */
+	sub_bytes(state);
+	shift_rows(state);
+	add_round_key(state, keys, 10);
+
+	/* The encryption process is completed.
+	 * Now we need to copy the cipher text
+	 * from state matrix to the output array.
+	 */
+	for (size_t i = 0; i < 4; i++)
+		for (size_t j = 0; j < 4; j++)
+			c[(i * 4) + j] = state[j][i];
+
+}
